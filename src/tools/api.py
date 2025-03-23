@@ -1,54 +1,36 @@
 import os
+import argparse
 import pandas as pd
-import requests
+from typing import List, Optional, Dict
 
 from data.cache import get_cache
 from data.models import (
     CompanyNews,
-    CompanyNewsResponse,
     FinancialMetrics,
-    FinancialMetricsResponse,
     Price,
-    PriceResponse,
     LineItem,
-    LineItemResponse,
     InsiderTrade,
-    InsiderTradeResponse,
 )
+from tools.api_providers.provider_manager import APIProviderManager
 
 # Global cache instance
 _cache = get_cache()
 
 
-def get_prices(ticker: str, start_date: str, end_date: str) -> list[Price]:
-    """Fetch price data from cache or API."""
-    # Check cache first
-    if cached_data := _cache.get_prices(ticker):
-        # Filter cached data by date range and convert to Price objects
-        filtered_data = [Price(**price) for price in cached_data if start_date <= price["time"] <= end_date]
-        if filtered_data:
-            return filtered_data
-
-    # If not in cache or no data in range, fetch from API
-    headers = {}
-    if api_key := os.environ.get("FINANCIAL_DATASETS_API_KEY"):
-        headers["X-API-KEY"] = api_key
-
-    url = f"https://api.financialdatasets.ai/prices/?ticker={ticker}&interval=day&interval_multiplier=1&start_date={start_date}&end_date={end_date}"
-    response = requests.get(url, headers=headers)
-    if response.status_code != 200:
-        raise Exception(f"Error fetching data: {ticker} - {response.status_code} - {response.text}")
-
-    # Parse response with Pydantic model
-    price_response = PriceResponse(**response.json())
-    prices = price_response.prices
-
-    if not prices:
-        return []
-
-    # Cache the results as dicts
-    _cache.set_prices(ticker, [p.model_dump() for p in prices])
-    return prices
+def get_prices(ticker: str, start_date: str, end_date: str) -> List[Price]:
+    """Fetch price data from cache or API.
+    
+    Args:
+        ticker: Stock ticker symbol
+        start_date: Start date in YYYY-MM-DD format
+        end_date: End date in YYYY-MM-DD format
+        
+    Returns:
+        List of Price objects
+    """
+    # Get the active provider and fetch prices
+    provider = APIProviderManager.get_provider()
+    return provider.get_prices(ticker, start_date, end_date)
 
 
 def get_financial_metrics(
@@ -56,216 +38,119 @@ def get_financial_metrics(
     end_date: str,
     period: str = "ttm",
     limit: int = 10,
-) -> list[FinancialMetrics]:
-    """Fetch financial metrics from cache or API."""
-    # Check cache first
-    if cached_data := _cache.get_financial_metrics(ticker):
-        # Filter cached data by date and limit
-        filtered_data = [FinancialMetrics(**metric) for metric in cached_data if metric["report_period"] <= end_date]
-        filtered_data.sort(key=lambda x: x.report_period, reverse=True)
-        if filtered_data:
-            return filtered_data[:limit]
-
-    # If not in cache or insufficient data, fetch from API
-    headers = {}
-    if api_key := os.environ.get("FINANCIAL_DATASETS_API_KEY"):
-        headers["X-API-KEY"] = api_key
-
-    url = f"https://api.financialdatasets.ai/financial-metrics/?ticker={ticker}&report_period_lte={end_date}&limit={limit}&period={period}"
-    response = requests.get(url, headers=headers)
-    if response.status_code != 200:
-        raise Exception(f"Error fetching data: {ticker} - {response.status_code} - {response.text}")
-
-    # Parse response with Pydantic model
-    metrics_response = FinancialMetricsResponse(**response.json())
-    # Return the FinancialMetrics objects directly instead of converting to dict
-    financial_metrics = metrics_response.financial_metrics
-
-    if not financial_metrics:
-        return []
-
-    # Cache the results as dicts
-    _cache.set_financial_metrics(ticker, [m.model_dump() for m in financial_metrics])
-    return financial_metrics
+) -> List[FinancialMetrics]:
+    """Fetch financial metrics from cache or API.
+    
+    Args:
+        ticker: Stock ticker symbol
+        end_date: End date in YYYY-MM-DD format
+        period: Reporting period (e.g., 'ttm', 'annual', 'quarterly')
+        limit: Maximum number of results to return
+        
+    Returns:
+        List of FinancialMetrics objects
+    """
+    # Get the active provider and fetch financial metrics
+    provider = APIProviderManager.get_provider()
+    return provider.get_financial_metrics(ticker, end_date, period, limit)
 
 
 def search_line_items(
     ticker: str,
-    line_items: list[str],
+    line_items: List[str],
     end_date: str,
     period: str = "ttm",
     limit: int = 10,
-) -> list[LineItem]:
-    """Fetch line items from API."""
-    # If not in cache or insufficient data, fetch from API
-    headers = {}
-    if api_key := os.environ.get("FINANCIAL_DATASETS_API_KEY"):
-        headers["X-API-KEY"] = api_key
-
-    url = "https://api.financialdatasets.ai/financials/search/line-items"
-
-    body = {
-        "tickers": [ticker],
-        "line_items": line_items,
-        "end_date": end_date,
-        "period": period,
-        "limit": limit,
-    }
-    response = requests.post(url, headers=headers, json=body)
-    if response.status_code != 200:
-        raise Exception(f"Error fetching data: {ticker} - {response.status_code} - {response.text}")
-    data = response.json()
-    response_model = LineItemResponse(**data)
-    search_results = response_model.search_results
-    if not search_results:
-        return []
-
-    # Cache the results
-    return search_results[:limit]
+) -> List[LineItem]:
+    """Fetch line items from API.
+    
+    Args:
+        ticker: Stock ticker symbol
+        line_items: List of line item names to search for
+        end_date: End date in YYYY-MM-DD format
+        period: Reporting period (e.g., 'ttm', 'annual', 'quarterly')
+        limit: Maximum number of results to return
+        
+    Returns:
+        List of LineItem objects
+    """
+    # Get the active provider and search for line items
+    provider = APIProviderManager.get_provider()
+    return provider.search_line_items(ticker, line_items, end_date, period, limit)
 
 
 def get_insider_trades(
     ticker: str,
     end_date: str,
-    start_date: str | None = None,
+    start_date: Optional[str] = None,
     limit: int = 1000,
-) -> list[InsiderTrade]:
-    """Fetch insider trades from cache or API."""
-    # Check cache first
-    if cached_data := _cache.get_insider_trades(ticker):
-        # Filter cached data by date range
-        filtered_data = [InsiderTrade(**trade) for trade in cached_data 
-                        if (start_date is None or (trade.get("transaction_date") or trade["filing_date"]) >= start_date)
-                        and (trade.get("transaction_date") or trade["filing_date"]) <= end_date]
-        filtered_data.sort(key=lambda x: x.transaction_date or x.filing_date, reverse=True)
-        if filtered_data:
-            return filtered_data
-
-    # If not in cache or insufficient data, fetch from API
-    headers = {}
-    if api_key := os.environ.get("FINANCIAL_DATASETS_API_KEY"):
-        headers["X-API-KEY"] = api_key
-
-    all_trades = []
-    current_end_date = end_date
+) -> List[InsiderTrade]:
+    """Fetch insider trades from cache or API.
     
-    while True:
-        url = f"https://api.financialdatasets.ai/insider-trades/?ticker={ticker}&filing_date_lte={current_end_date}"
-        if start_date:
-            url += f"&filing_date_gte={start_date}"
-        url += f"&limit={limit}"
+    Args:
+        ticker: Stock ticker symbol
+        end_date: End date in YYYY-MM-DD format
+        start_date: Optional start date in YYYY-MM-DD format
+        limit: Maximum number of results to return
         
-        response = requests.get(url, headers=headers)
-        if response.status_code != 200:
-            raise Exception(f"Error fetching data: {ticker} - {response.status_code} - {response.text}")
-        
-        data = response.json()
-        response_model = InsiderTradeResponse(**data)
-        insider_trades = response_model.insider_trades
-        
-        if not insider_trades:
-            break
-            
-        all_trades.extend(insider_trades)
-        
-        # Only continue pagination if we have a start_date and got a full page
-        if not start_date or len(insider_trades) < limit:
-            break
-            
-        # Update end_date to the oldest filing date from current batch for next iteration
-        current_end_date = min(trade.filing_date for trade in insider_trades).split('T')[0]
-        
-        # If we've reached or passed the start_date, we can stop
-        if current_end_date <= start_date:
-            break
-
-    if not all_trades:
-        return []
-
-    # Cache the results
-    _cache.set_insider_trades(ticker, [trade.model_dump() for trade in all_trades])
-    return all_trades
+    Returns:
+        List of InsiderTrade objects
+    """
+    # Get the active provider and fetch insider trades
+    provider = APIProviderManager.get_provider()
+    return provider.get_insider_trades(ticker, end_date, start_date, limit)
 
 
 def get_company_news(
     ticker: str,
     end_date: str,
-    start_date: str | None = None,
+    start_date: Optional[str] = None,
     limit: int = 1000,
-) -> list[CompanyNews]:
-    """Fetch company news from cache or API."""
-    # Check cache first
-    if cached_data := _cache.get_company_news(ticker):
-        # Filter cached data by date range
-        filtered_data = [CompanyNews(**news) for news in cached_data 
-                        if (start_date is None or news["date"] >= start_date)
-                        and news["date"] <= end_date]
-        filtered_data.sort(key=lambda x: x.date, reverse=True)
-        if filtered_data:
-            return filtered_data
-
-    # If not in cache or insufficient data, fetch from API
-    headers = {}
-    if api_key := os.environ.get("FINANCIAL_DATASETS_API_KEY"):
-        headers["X-API-KEY"] = api_key
-
-    all_news = []
-    current_end_date = end_date
+) -> List[CompanyNews]:
+    """Fetch company news from cache or API.
     
-    while True:
-        url = f"https://api.financialdatasets.ai/news/?ticker={ticker}&end_date={current_end_date}"
-        if start_date:
-            url += f"&start_date={start_date}"
-        url += f"&limit={limit}"
+    Args:
+        ticker: Stock ticker symbol
+        end_date: End date in YYYY-MM-DD format
+        start_date: Optional start date in YYYY-MM-DD format
+        limit: Maximum number of results to return
         
-        response = requests.get(url, headers=headers)
-        if response.status_code != 200:
-            raise Exception(f"Error fetching data: {ticker} - {response.status_code} - {response.text}")
-        
-        data = response.json()
-        response_model = CompanyNewsResponse(**data)
-        company_news = response_model.news
-        
-        if not company_news:
-            break
-            
-        all_news.extend(company_news)
-        
-        # Only continue pagination if we have a start_date and got a full page
-        if not start_date or len(company_news) < limit:
-            break
-            
-        # Update end_date to the oldest date from current batch for next iteration
-        current_end_date = min(news.date for news in company_news).split('T')[0]
-        
-        # If we've reached or passed the start_date, we can stop
-        if current_end_date <= start_date:
-            break
-
-    if not all_news:
-        return []
-
-    # Cache the results
-    _cache.set_company_news(ticker, [news.model_dump() for news in all_news])
-    return all_news
+    Returns:
+        List of CompanyNews objects
+    """
+    # Get the active provider and fetch company news
+    provider = APIProviderManager.get_provider()
+    return provider.get_company_news(ticker, end_date, start_date, limit)
 
 
 
 def get_market_cap(
     ticker: str,
     end_date: str,
-) -> float | None:
-    """Fetch market cap from the API."""
-    financial_metrics = get_financial_metrics(ticker, end_date)
-    market_cap = financial_metrics[0].market_cap
-    if not market_cap:
-        return None
+) -> Optional[float]:
+    """Fetch market cap from the API.
+    
+    Args:
+        ticker: Stock ticker symbol
+        end_date: End date in YYYY-MM-DD format
+        
+    Returns:
+        Market cap value or None if not available
+    """
+    # Get the active provider and fetch market cap
+    provider = APIProviderManager.get_provider()
+    return provider.get_market_cap(ticker, end_date)
 
-    return market_cap
 
-
-def prices_to_df(prices: list[Price]) -> pd.DataFrame:
-    """Convert prices to a DataFrame."""
+def prices_to_df(prices: List[Price]) -> pd.DataFrame:
+    """Convert a list of Price objects to a pandas DataFrame.
+    
+    Args:
+        prices: List of Price objects
+        
+    Returns:
+        DataFrame with price data
+    """
     df = pd.DataFrame([p.model_dump() for p in prices])
     df["Date"] = pd.to_datetime(df["time"])
     df.set_index("Date", inplace=True)
@@ -276,7 +161,77 @@ def prices_to_df(prices: list[Price]) -> pd.DataFrame:
     return df
 
 
-# Update the get_price_data function to use the new functions
 def get_price_data(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """
+    Fetch price data and convert to a pandas DataFrame.
+    
+    Args:
+        ticker: Stock ticker symbol
+        start_date: Start date in YYYY-MM-DD format
+        end_date: End date in YYYY-MM-DD format
+        
+    Returns:
+        DataFrame with price data
+    """
     prices = get_prices(ticker, start_date, end_date)
     return prices_to_df(prices)
+
+
+def get_available_providers() -> Dict[str, str]:
+    """
+    Get a dictionary of available API providers.
+    
+    Returns:
+        Dictionary mapping provider keys to provider names
+    """
+    return APIProviderManager.get_available_providers()
+
+
+def get_current_provider() -> str:
+    """
+    Get the key of the currently active API provider.
+    
+    Returns:
+        Provider key as a string
+    """
+    provider = APIProviderManager.get_provider()
+    for key, cls in APIProviderManager._providers.items():
+        if isinstance(provider, cls):
+            return key
+    return "unknown"
+
+
+def set_api_provider(provider_name: str) -> None:
+    """
+    Set the active API provider by name.
+    
+    Args:
+        provider_name: Name of the provider to set as active
+    """
+    APIProviderManager.set_provider(provider_name)
+
+
+def parse_api_provider_args():
+    """
+    Parse command-line arguments for API provider selection.
+    This can be used to add API provider selection to existing scripts.
+    
+    Returns:
+        Parsed arguments
+    """
+    parser = argparse.ArgumentParser(description="API Provider Selection")
+    parser.add_argument(
+        "--api-provider", 
+        type=str,
+        choices=list(get_available_providers().keys()),
+        help="API provider to use for financial data"
+    )
+    
+    # Parse known args only, so it can be used alongside other argument parsers
+    args, _ = parser.parse_known_args()
+    
+    # Set the API provider if specified
+    if args.api_provider:
+        set_api_provider(args.api_provider)
+    
+    return args
